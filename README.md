@@ -25,7 +25,7 @@ from sklearn.metrics import roc_auc_score
 # params
 dfm_params = {
     "use_fm": True,
-    "use_deep": True,
+    "use_deep": True,_____df
     "embedding_size": 8,
     "dropout_fm": [1.0, 1.0],
     "deep_layers": [32, 32],

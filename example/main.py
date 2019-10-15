@@ -19,26 +19,45 @@ gini_scorer = make_scorer(gini_norm, greater_is_better=True, needs_proba=True)
 
 
 def _load_data():
+    '''
+    加载训练数据和测试数据
 
+    :return:
+    '''
+    # 总共59列，包括序号（id）列和目标列（target）
     dfTrain = pd.read_csv(config.TRAIN_FILE)
+    # 总共58列
     dfTest = pd.read_csv(config.TEST_FILE)
 
     def preprocess(df):
+        '''
+        补充了两个字段
+        :param df:
+        :return:
+        '''
         cols = [c for c in df.columns if c not in ["id", "target"]]
+        # 此样本缺失字段数
         df["missing_feat"] = np.sum((df[cols] == -1).values, axis=1)
+
+        # 为什么要做这个特征交叉？？
         df["ps_car_13_x_ps_reg_03"] = df["ps_car_13"] * df["ps_reg_03"]
         return df
 
     dfTrain = preprocess(dfTrain)
     dfTest = preprocess(dfTest)
 
+    # 将序号列和目标列排除
     cols = [c for c in dfTrain.columns if c not in ["id", "target"]]
+
+    # 为了调试，临时去除的列。因为id\target也在排除列配置列，所以上面一句是多余的
     cols = [c for c in cols if (not c in config.IGNORE_COLS)]
 
     X_train = dfTrain[cols].values
     y_train = dfTrain["target"].values
     X_test = dfTest[cols].values
     ids_test = dfTest["id"].values
+
+    # 类别列（特征）的序号
     cat_features_indices = [i for i,c in enumerate(cols) if c in config.CATEGORICAL_COLS]
 
     return dfTrain, dfTest, X_train, y_train, X_test, ids_test, cat_features_indices
@@ -52,17 +71,24 @@ def _run_base_model_dfm(dfTrain, dfTest, folds, dfm_params):
     Xi_train, Xv_train, y_train = data_parser.parse(df=dfTrain, has_label=True)
     Xi_test, Xv_test, ids_test = data_parser.parse(df=dfTest)
 
+    # feature_size就是one_hot之后的维度数量
     dfm_params["feature_size"] = fd.feat_dim
+    #field_size就是one_hot之前的维度数量，换句话说，就是原生的特征向量的维度数量
     dfm_params["field_size"] = len(Xi_train[0])
 
     y_train_meta = np.zeros((dfTrain.shape[0], 1), dtype=float)
     y_test_meta = np.zeros((dfTest.shape[0], 1), dtype=float)
+
+    # 从列表中取出部分数据（根据索引list l）
     _get = lambda x, l: [x[i] for i in l]
     gini_results_cv = np.zeros(len(folds), dtype=float)
     gini_results_epoch_train = np.zeros((len(folds), dfm_params["epoch"]), dtype=float)
     gini_results_epoch_valid = np.zeros((len(folds), dfm_params["epoch"]), dtype=float)
     for i, (train_idx, valid_idx) in enumerate(folds):
+        # 从Xi_train、Xv_train和y_train对应的取出来
         Xi_train_, Xv_train_, y_train_ = _get(Xi_train, train_idx), _get(Xv_train, train_idx), _get(y_train, train_idx)
+
+        # 测试数据相同
         Xi_valid_, Xv_valid_, y_valid_ = _get(Xi_train, valid_idx), _get(Xv_train, valid_idx), _get(y_train, valid_idx)
 
         dfm = DeepFM(**dfm_params)
@@ -117,6 +143,7 @@ def _plot_fig(train_results, valid_results, model_name):
 
 
 # load data
+# cat_features_indices暂时没有用到
 dfTrain, dfTest, X_train, y_train, X_test, ids_test, cat_features_indices = _load_data()
 
 # folds
@@ -145,18 +172,19 @@ dfm_params = {
     "eval_metric": gini_norm,
     "random_seed": config.RANDOM_SEED
 }
+# 两部分都用
 y_train_dfm, y_test_dfm = _run_base_model_dfm(dfTrain, dfTest, folds, dfm_params)
 
-# ------------------ FM Model ------------------
-fm_params = dfm_params.copy()
-fm_params["use_deep"] = False
-y_train_fm, y_test_fm = _run_base_model_dfm(dfTrain, dfTest, folds, fm_params)
-
-
-# ------------------ DNN Model ------------------
-dnn_params = dfm_params.copy()
-dnn_params["use_fm"] = False
-y_train_dnn, y_test_dnn = _run_base_model_dfm(dfTrain, dfTest, folds, dnn_params)
-
-
+# # ------------------ FM Model ------------------
+# fm_params = dfm_params.copy()
+# fm_params["use_deep"] = False
+# y_train_fm, y_test_fm = _run_base_model_dfm(dfTrain, dfTest, folds, fm_params)
+#
+#
+# # ------------------ DNN Model ------------------
+# dnn_params = dfm_params.copy()
+# dnn_params["use_fm"] = False
+# y_train_dnn, y_test_dnn = _run_base_model_dfm(dfTrain, dfTest, folds, dnn_params)
+#
+#
 

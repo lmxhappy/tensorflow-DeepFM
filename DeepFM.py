@@ -59,7 +59,8 @@ class DeepFM(BaseEstimator, TransformerMixin):
         self.train_result, self.valid_result = [], []
 
         self._init_graph()
-
+        # print(self.weights['feature_embeddings'])
+        # print(self.weights['feature_embeddings'].shape)
 
     def _init_graph(self):
         self.graph = tf.Graph()
@@ -67,8 +68,12 @@ class DeepFM(BaseEstimator, TransformerMixin):
 
             tf.set_random_seed(self.random_seed)
 
+            # shape说明是一个二维矩阵，第一维是样本个数吗？像.
+            # batch_size * 39
             self.feat_index = tf.placeholder(tf.int32, shape=[None, None],
                                                  name="feat_index")  # None * F
+
+            # shape说明是一个二维矩阵: batch_size * 39
             self.feat_value = tf.placeholder(tf.float32, shape=[None, None],
                                                  name="feat_value")  # None * F
             self.label = tf.placeholder(tf.float32, shape=[None, 1], name="label")  # None * 1
@@ -76,30 +81,55 @@ class DeepFM(BaseEstimator, TransformerMixin):
             self.dropout_keep_deep = tf.placeholder(tf.float32, shape=[None], name="dropout_keep_deep")
             self.train_phase = tf.placeholder(tf.bool, name="train_phase")
 
+            # 随机初始化weight
             self.weights = self._initialize_weights()
 
-            # model
+            # print(self.feat_index.shape): (1024, 39)
+            # batch_size * 39 * 8(vi、vj的维度？？？感觉这样不对，这是V的shape，vi、vj的维度应该是batch_size*39*1)
             self.embeddings = tf.nn.embedding_lookup(self.weights["feature_embeddings"],
-                                                             self.feat_index)  # None * F * K
+                                                             self.feat_index)  # 之后，self.embeddings的shape：None * F * K（embbed之后的维度）
+            # 变成了一个列向量
+            # 原来是 batch_size * 39====》 batch_size * 39 * 1
+            # reshape将shape变的跟self.embeddings的一致，为了后面两者做multiply
             feat_value = tf.reshape(self.feat_value, shape=[-1, self.field_size, 1])
+            print(self.embeddings.shape, feat_value.shape)
+
+            # batch_size * 39 * 8《==  batch_size * 39 * 8，batch_size * 39 * 1
+            # broadcast了feature value
+            # 这里与embedding没有什么关系了
             self.embeddings = tf.multiply(self.embeddings, feat_value)
 
-            # ---------- first order term ----------
+            # ----------wide fm: first order term ----------
+            # None * 39 * 1 ，如(1024, 39, 1)
+            # 从# 259 * 1的矩阵（self.weights["feature_bias"]）中找39行（self.feat_index）。
             self.y_first_order = tf.nn.embedding_lookup(self.weights["feature_bias"], self.feat_index) # None * F * 1
+            # self.y_first_order_weights = self.y_first_order
+
+            #临时加上去的。后面删掉
+            self.y_first_order_tmp = self.y_first_order
+
+            # self.y_first_order, feat_value都是batch_size * 39 * 1
+            # 算完之后就是batch_size * 39
             self.y_first_order = tf.reduce_sum(tf.multiply(self.y_first_order, feat_value), 2)  # None * F
             self.y_first_order = tf.nn.dropout(self.y_first_order, self.dropout_keep_fm[0]) # None * F
 
-            # ---------- second order term ---------------
+            # ----------wide fm: second order term ---------------
             # sum_square part
+            # batch_size * 8
             self.summed_features_emb = tf.reduce_sum(self.embeddings, 1)  # None * K
+            # batch_size * 8
             self.summed_features_emb_square = tf.square(self.summed_features_emb)  # None * K
 
             # square_sum part
+            # batch_size * 8
             self.squared_features_emb = tf.square(self.embeddings)
+            # batch_size * 8
             self.squared_sum_features_emb = tf.reduce_sum(self.squared_features_emb, 1)  # None * K
 
             # second order
+            # batch_size * 8。每个样本成了一个vector了
             self.y_second_order = 0.5 * tf.subtract(self.summed_features_emb_square, self.squared_sum_features_emb)  # None * K
+            # batch_size * 8
             self.y_second_order = tf.nn.dropout(self.y_second_order, self.dropout_keep_fm[1])  # None * K
 
             # ---------- Deep component ----------
@@ -114,11 +144,15 @@ class DeepFM(BaseEstimator, TransformerMixin):
 
             # ---------- DeepFM ----------
             if self.use_fm and self.use_deep:
+                # 一阶和二阶的concat到一起
+                # (1024, 39)+(1024, 8)+(1024, 32)===>(1024, 79)
                 concat_input = tf.concat([self.y_first_order, self.y_second_order, self.y_deep], axis=1)
             elif self.use_fm:
                 concat_input = tf.concat([self.y_first_order, self.y_second_order], axis=1)
             elif self.use_deep:
                 concat_input = self.y_deep
+
+            self.concat_input = concat_input
             self.out = tf.add(tf.matmul(concat_input, self.weights["concat_projection"]), self.weights["concat_bias"])
 
             # loss
@@ -156,7 +190,10 @@ class DeepFM(BaseEstimator, TransformerMixin):
             self.saver = tf.train.Saver()
             init = tf.global_variables_initializer()
             self.sess = self._init_session()
+            writer = tf.summary.FileWriter("logs/", self.sess.graph)  # 第一个参数指定生成文件的目录。
+
             self.sess.run(init)
+            # print(self.embeddings.shape, feat_value.shape)
 
             # number of params
             total_parameters = 0
@@ -177,12 +214,20 @@ class DeepFM(BaseEstimator, TransformerMixin):
 
 
     def _initialize_weights(self):
+        '''
+        为各层生成的备用的随机weight，但不是各层的实际weight！！！
+
+        :return:
+        '''
         weights = dict()
 
         # embeddings
+        # 259 * 8的矩阵
         weights["feature_embeddings"] = tf.Variable(
             tf.random_normal([self.feature_size, self.embedding_size], 0.0, 0.01),
             name="feature_embeddings")  # feature_size * K
+
+        # 259 * 1的矩阵
         weights["feature_bias"] = tf.Variable(
             tf.random_uniform([self.feature_size, 1], 0.0, 1.0), name="feature_bias")  # feature_size * 1
 
@@ -252,6 +297,18 @@ class DeepFM(BaseEstimator, TransformerMixin):
                      self.dropout_keep_fm: self.dropout_fm,
                      self.dropout_keep_deep: self.dropout_deep,
                      self.train_phase: True}
+        # feat_index  = self.sess.run((self.feat_index), feed_dict=feed_dict)
+        # print(feat_index)
+        # print(feat_index.shape)
+
+        # y_first_order, y_second_order, y_deep, concat_input  = self.sess.run((self.y_first_order, self.y_second_order, self.y_deep,self.concat_input), feed_dict=feed_dict)
+        # print(y_first_order, y_second_order, y_deep, concat_input)
+        # print(y_first_order.shape, y_second_order.shape, y_deep.shape, concat_input.shape)
+
+        # y_first_order_weights  = self.sess.run((self.y_first_order_weights), feed_dict=feed_dict)
+        # print(y_first_order_weights)
+        # print(y_first_order_weights.shape)
+
         loss, opt = self.sess.run((self.loss, self.optimizer), feed_dict=feed_dict)
         return loss
 
